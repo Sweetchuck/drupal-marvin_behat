@@ -1,0 +1,8 @@
+parameters:
+	paths:
+		- ../Commands/
+		- ../src/
+		- ../tests/src/
+	#excludePaths:
+	#	- ../tests/_log/
+	#	- ../tests/_support/_generated/

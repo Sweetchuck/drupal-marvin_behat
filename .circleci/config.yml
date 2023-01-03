@@ -1,0 +1,260 @@
+version: 2.1
+
+orbs:
+  codecov: 'codecov/codecov@3.0.0'
+
+.env_app: &env_app
+  SHELL: '/bin/bash'
+
+.env_xdebug: &env_xdebug
+  XDEBUG_MODE: 'coverage'
+
+.env_composer: &env_composer
+  COMPOSER_ALLOW_SUPERUSER: '1'
+  COMPOSER_NO_INTERACTION: '1'
+  COMPOSER_MEMORY_LIMIT: '-1'
+  COMPOSER_DISABLE_XDEBUG_WARN: '1'
+  COMPOSER_CACHE_DIR: '/home/circleci/.cache/composer'
+  COMPOSER_IGNORE_PLATFORM_REQ: 'php'
+
+.env_node: &env_node
+  NVM_DIR: '/home/circleci/.nvm'
+  YARN_CACHE_FOLDER: '/home/circleci/.cache/yarn'
+
+.env_test: &env_test
+  SIMPLETEST_BASE_URL: 'http://localhost:8888'
+  DTT_BASE_URL: 'http://localhost:8888'
+  SIMPLETEST_DB: 'sqlite://sites/default/db.default.default.sqlite'
+  UNISH_DB_URL: 'sqlite://sites/default/db.default.default.sqlite'
+  UNISH_NO_TIMEOUTS: 'y'
+  BROWSERTEST_OUTPUT_DIRECTORY: '/home/circleci/repo/tests/fixtures/project_01/docroot/sites/simpletest/browser_output'
+  REAL_NVM_DIR: '/home/circleci/.nvm'
+
+executors:
+  php_min:
+    resource_class: 'small'
+    environment:
+      <<: *env_app
+      <<: *env_xdebug
+      <<: *env_composer
+      <<: *env_node
+      <<: *env_test
+    docker:
+      -
+        name: 'main'
+        image: 'cimg/php:8.2'
+
+#  php_plus1:
+#    resource_class: 'small'
+#    environment:
+#      <<: *env_app
+#      <<: *env_xdebug
+#      <<: *env_composer
+#      <<: *env_node
+#      <<: *env_test
+#    docker:
+#      -
+#        name: 'main'
+#        image: 'cimg/php:8.3'
+
+commands:
+  install_php_extension_gd:
+    description: 'Install required PHP extensions - GD'
+    steps:
+      -
+        run:
+          name: 'Install required PHP extensions - GD'
+          command: |
+            if php -m | grep gd ; then
+                exit 0
+            fi
+
+            sudo apt-get update
+            sudo apt-get install -y libpng-dev
+            sudo docker-php-ext-install gd
+            php -m | grep gd
+
+  install_php_extension_xdebug:
+    description: 'Install required PHP extensions - xdebug'
+    steps:
+      -
+        run:
+          name: 'Install required PHP extensions - xdebug'
+          command: |
+            if php -m | grep xdebug ; then
+                exit 0
+            fi
+
+            sudo apt-get update
+            sudo apt-get install -y \
+              "php$(php -r 'echo mb_substr(PHP_VERSION, 0, 3);')-xdebug"
+
+  install_php_extension_pcov:
+    description: 'Install PCOV PHP extension'
+    steps:
+      -
+        run:
+          name: 'Install PCOV PHP extension - pecl install pcov'
+          command: |
+            if php -m | grep pcov ; then
+                exit 0
+            fi
+
+            sudo pecl install pcov
+
+            if php -m | grep pcov ; then
+                exit 0
+            fi
+
+            scanDir="$(php -i | grep --color=never --only-matching --perl-regexp '(?<=^Scan this dir for additional \.ini files => ).+')"
+            echo 'extension=pcov' | sudo tee "${scanDir}/pcov.ini"
+            php -m | grep pcov
+
+  nvm_install:
+    description: 'NVM install'
+    steps:
+      -
+        when:
+          condition:
+            equal:
+              - true
+              - false
+          steps:
+            -
+              run:
+                name: 'NVM install - self'
+                command: |
+                  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash
+            -
+              run:
+                name: 'NVM install - node version .nvmrc'
+                command: |
+                  nvmRcFileName="$(git ls-files -- './.nvmrc' '**/.nvmrc' | tail -1)"
+                  source "${REAL_NVM_DIR}/nvm.sh" --no-use
+                  nvm install "$(cat ${nvmRcFileName})"
+            -
+              run:
+                name: 'NVM install - install yarn for node .nvmrc'
+                command: |
+                  source "${REAL_NVM_DIR}/nvm.sh"
+                  npm --global install --save yarn
+                  yarn config set cache-folder "${YARN_CACHE_FOLDER}"
+
+  composer_install:
+    description: 'Install Composer dependencies with cache restore and save'
+    steps:
+      -
+        restore_cache:
+          name: 'Composer - cache restore'
+          keys:
+            - 'composer-{{ checksum "./composer.lock" }}-v2'
+      -
+        run:
+          name: 'Composer - install'
+          command: |
+            sudo composer self-update
+            composer install --no-progress
+      -
+        save_cache:
+          name: 'Composer - cache save'
+          key: 'composer-{{ checksum "./composer.lock" }}-v2'
+          paths:
+            - '/home/circleci/.cache/composer/'
+
+  lint:
+    description: 'Run linters'
+    steps:
+      -
+        run:
+          name: 'Run linters'
+          command: |
+            "$(composer config bin-dir)/robo" lint
+
+  test:
+    description: 'Run tests'
+    steps:
+#      -
+#        restore_cache:
+#          name: 'Yarn - cache restore'
+#          keys:
+#            - 'yarn-{{ checksum "./tests/fixtures/project_01/docroot/themes/custom/dummy_t1/package.json" }}-v2'
+      -
+        run:
+          name: 'Run tests - Unit'
+          command: |
+            [ ! -s .nvmrc ] || source "${REAL_NVM_DIR}/nvm.sh"
+            "$(composer config bin-dir)/robo" test:phpunit Unit
+      -
+        codecov/upload:
+          flags: 'Unit'
+          file: './reports/machine/coverage/Unit/clover.xml'
+      -
+        run:
+          name: 'Run tests - Integration'
+          command: |
+            [ ! -s .nvmrc ] || source "${REAL_NVM_DIR}/nvm.sh"
+            cd tests/fixtures/project_01/docroot
+            php -S localhost:8888 .ht.router.php 1>/dev/null 2>/dev/null &
+            cd ../../../..
+            "$(composer config bin-dir)/robo" test:phpunit Integration
+      -
+        codecov/upload:
+          flags: 'Integration'
+          file: './reports/machine/coverage/Integration/clover.xml'
+      -
+        store_test_results:
+          name: 'Store test results'
+          path: './reports/machine/unit'
+#      -
+#        save_cache:
+#          name: 'Yarn - cache save'
+#          key: 'yarn-{{ checksum "./tests/fixtures/project_01/docroot/themes/custom/dummy_t1/package.json" }}-v2'
+#          paths:
+#            - '/home/circleci/.cache/yarn/'
+
+jobs:
+  build:
+    executor: 'php_min'
+    steps:
+      - 'checkout'
+      - 'install_php_extension_gd'
+      - 'composer_install'
+  lint:
+    executor: 'php_min'
+    steps:
+      - 'checkout'
+      - 'install_php_extension_gd'
+      - 'composer_install'
+      - 'lint'
+  test:
+    parameters:
+      executor:
+        type: 'string'
+    executor: '<<parameters.executor>>'
+    steps:
+      - 'checkout'
+      - 'install_php_extension_gd'
+      - 'install_php_extension_pcov'
+      - 'nvm_install'
+      - 'composer_install'
+      - 'test'
+
+workflows:
+  lint_and_test:
+    jobs:
+      -
+        build: {}
+      -
+        lint:
+          requires:
+            - 'build'
+      -
+        test:
+          name: 'test_<<matrix.executor>>'
+          requires:
+            - 'build'
+          matrix:
+            parameters:
+              executor:
+                - 'php_min'
+#                - 'php_plus1'
